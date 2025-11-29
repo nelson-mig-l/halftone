@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>Halftone</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+        body {
+            font-family: system-ui, Arial;
+            background: #f5f7fb;
+            color: #222;
+            margin: 24px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .card {
+            width: 100%;
+            max-width: 980px;
+            background: #fff;
+            padding: 18px;
+            border-radius: 12px;
+            box-shadow: 0 8px 30px rgba(10, 20, 40, 0.06);
+        }
+
+        .row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: end;
+        }
+
+        .field {
+            display: flex;
+            flex-direction: column;
+            min-width: 120px;
+        }
+
+        label {
+            font-size: 13px;
+            color: #444;
+            margin-bottom: 6px;
+        }
+
+        input[type="number"],
+        input[type="color"],
+        input[type="file"] {
+            padding: 2px;
+            border-radius: 8px;
+            border: 1px solid #e6e9ef;
+        }
+
+        button {
+            background: #1967d2;
+            color: #fff;
+            border: none;
+            padding: 10px 14px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        #status {
+            margin-top: 12px;
+            color: #555;
+        }
+
+        canvas {
+            display: block;
+            margin-top: 18px;
+            max-width: 100%;
+            border-radius: 8px;
+            border: 1px solid #e6e9ef;
+        }
+
+        @media (max-width:640px) {
+            .row {
+                flex-direction: column
+            }
+
+            .field {
+                min-width: 100%
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <h2 style="margin:0 0 12px 0">Halftone</h2>
+
+        <div class="row">
+            <div class="field"><label>Image</label><input id="imgFile" type="file" accept="image/*"></div>
+            <div class="field"><label>Square side (px)</label><input id="side" type="number" value="5" min="1"></div>
+            <div class="field"><label>Jump (px) — sampling pitch</label><input id="jump" type="number" value="5"
+                    min="1">
+            </div>
+            <div class="field"><label>Screen angle (deg)</label><input id="angle" type="number" value="30" step="1">
+            </div>
+            <div class="field"><label>Alpha (scale)</label><input id="alpha" type="number" value="1.4" step="0.1"
+                    min="0.01"></div>
+            <div class="field"><label>FG</label><input id="fg" type="color" value="#000000"></div>
+            <div class="field"><label>BG</label><input id="bg" type="color" value="#ffffff"></div>
+            <div style="align-self:flex-end">
+                <button id="run">Generate</button>
+            </div>
+        </div>
+
+        <div id="status"></div>
+        <canvas id="outCanvas"></canvas>
+    </div>
+
+    <script>
+        function hexToRgb(hex) {
+            hex = hex.replace('#', '');
+            if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
+            return { r: parseInt(hex.slice(0, 2), 16), g: parseInt(hex.slice(2, 4), 16), b: parseInt(hex.slice(4, 6), 16) };
+        }
+        function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+        // average grayscale in a square centered at (cx,cy)
+        function avgGray(pixels, imgW, imgH, cx, cy, boxSize) {
+            const half = Math.floor(boxSize / 2);
+            let sum = 0, count = 0;
+            const startX = Math.round(cx) - half;
+            const startY = Math.round(cy) - half;
+            for (let yy = 0; yy < boxSize; yy++) {
+                const y = clamp(startY + yy, 0, imgH - 1);
+                let rowOff = (y * imgW) * 4;
+                for (let xx = 0; xx < boxSize; xx++) {
+                    const x = clamp(startX + xx, 0, imgW - 1);
+                    const idx = rowOff + x * 4;
+                    sum += (pixels[idx] + pixels[idx + 1] + pixels[idx + 2]) / 3;
+                    count++;
+                }
+            }
+            return (count > 0) ? (sum / count) : 0;
+        }
+
+        document.getElementById('run').addEventListener('click', async () => {
+            const file = document.getElementById('imgFile').files[0];
+            if (!file) { alert('Choose an image.'); return; }
+
+            const side = Math.max(1, Math.round(Number(document.getElementById('side').value) || 20));
+            let jump = Math.max(1, Math.round(Number(document.getElementById('jump').value) || 7));
+            const angleDeg = Number(document.getElementById('angle').value) || 0;
+            const alpha = Math.max(0.01, Number(document.getElementById('alpha').value) || 1.4);
+            const fgC = hexToRgb(document.getElementById('fg').value || '#000');
+            const bgC = hexToRgb(document.getElementById('bg').value || '#fff');
+
+            const status = document.getElementById('status');
+            status.textContent = 'Loading image...';
+
+            const img = new Image();
+            img.src = URL.createObjectURL(file);
+            await new Promise(res => { img.onload = res; });
+
+            const iw = img.width, ih = img.height;
+            const outCanvas = document.getElementById('outCanvas');
+            outCanvas.width = iw; outCanvas.height = ih;
+            const ctx = outCanvas.getContext('2d');
+
+            // Fill background color
+            ctx.fillStyle = `rgb(${bgC.r},${bgC.g},${bgC.b})`;
+            ctx.fillRect(0, 0, iw, ih);
+
+            // Draw image into temp canvas to sample pixels
+            const temp = document.createElement('canvas');
+            temp.width = iw; temp.height = ih;
+            const tctx = temp.getContext('2d');
+            tctx.drawImage(img, 0, 0, iw, ih);
+            const imgData = tctx.getImageData(0, 0, iw, ih);
+            const pixels = imgData.data;
+
+            if (!jump) jump = Math.max(1, Math.ceil(Math.min(iw, ih) * 0.007));
+
+            const angle = angleDeg * Math.PI / 180;
+            const c = Math.cos(angle), s = Math.sin(angle);
+            const cx = iw / 2, cy = ih / 2;
+            const ext = Math.ceil(Math.max(iw, ih) / jump) + 4;
+            const halfExt = ext;
+
+            status.textContent = 'Rendering halftone dots...';
+
+            for (let j = -halfExt; j <= halfExt; j++) {
+                for (let i = -halfExt; i <= halfExt; i++) {
+                    const gx = i * jump;
+                    const gy = j * jump;
+                    // rotate lattice
+                    const rx = gx * c - gy * s;
+                    const ry = gx * s + gy * c;
+                    const px = rx + cx;
+                    const py = ry + cy;
+                    if (px < 0 - side || px > iw + side || py < 0 - side || py > ih + side) continue;
+                    const avg = avgGray(pixels, iw, ih, px, py, Math.max(1, jump));
+                    const intensity = 1 - (avg / 255);
+                    const radius = (alpha * intensity * side) / 2;
+                    if (radius > 0.3) {
+                        ctx.beginPath();
+                        ctx.fillStyle = `rgb(${fgC.r},${fgC.g},${fgC.b})`;
+                        ctx.arc(px, py, radius, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+            }
+
+            status.textContent = `Done — halftone generated at ${angleDeg}° lattice.`;
+        });
+    </script>
+</body>
+
+</html>
